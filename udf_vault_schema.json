@@ -1,0 +1,200 @@
+{
+    "schemas": [
+        {
+            "ID": "t98b044d80184b1fab4b6200c2a7b53b",
+            "name": "pii",
+            "parentSchemaProperties": {
+                "parentID": "",
+                "isArray": false,
+                "tableType": "TT_BASE",
+                "parentFieldTags": [],
+                "name": ""
+            },
+            "fields": [
+                {
+                    "name": "skyflow_id",
+                    "datatype": "DT_STRING",
+                    "isArray": false,
+                    "tags": [
+                        {
+                            "name": "skyflow.options.default_dlp_policy",
+                            "values": [
+                                "PLAIN_TEXT"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.operation",
+                            "values": [
+                                "ALL_OP"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.sensitivity",
+                            "values": [
+                                "LOW"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.data_type",
+                            "values": [
+                                "skyflow.SkyflowID"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.description",
+                            "values": [
+                                "Skyflow defined Primary Key"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.display_name",
+                            "values": [
+                                "Skyflow ID"
+                            ]
+                        }
+                    ],
+                    "properties": null,
+                    "index": 0,
+                    "ID": ""
+                },
+                {
+                    "name": "pii_fpt",
+                    "datatype": "DT_STRING",
+                    "isArray": false,
+                    "tags": [
+                        {
+                            "name": "skyflow.options.default_dlp_policy",
+                            "values": [
+                                "MASK"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.find_pattern",
+                            "values": [
+                                "(.).*(.{2})"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.replace_pattern",
+                            "values": [
+                                "${1}***${2}"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.operation",
+                            "values": [
+                                "ALL_OP"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.default_token_policy",
+                            "values": [
+                                "DETERMINISTIC_FPT"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.index",
+                            "values": [
+                                "true"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.description",
+                            "values": [
+                                "String"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.display_name",
+                            "values": [
+                                "pii_fpt"
+                            ]
+                        }
+                    ],
+                    "properties": null,
+                    "index": 0,
+                    "ID": ""
+                },
+                {
+                    "name": "pii_non_fpt",
+                    "datatype": "DT_STRING",
+                    "isArray": false,
+                    "tags": [
+                        {
+                            "name": "skyflow.options.default_dlp_policy",
+                            "values": [
+                                "MASK"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.find_pattern",
+                            "values": [
+                                "(.).*(.{2})"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.replace_pattern",
+                            "values": [
+                                "${1}***${2}"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.operation",
+                            "values": [
+                                "ALL_OP"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.default_token_policy",
+                            "values": [
+                                "DETERMINISTIC_UUID"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.index",
+                            "values": [
+                                "true"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.description",
+                            "values": [
+                                "String"
+                            ]
+                        },
+                        {
+                            "name": "skyflow.options.display_name",
+                            "values": [
+                                "pii_non_fpt"
+                            ]
+                        }
+                    ],
+                    "properties": null,
+                    "index": 0,
+                    "ID": ""
+                }
+            ],
+            "childrenSchemas": [],
+            "schemaTags": [
+                {
+                    "name": "skyflow.options.description",
+                    "values": [
+                        "Scratch Table is a minimal table in a vault."
+                    ]
+                },
+                {
+                    "name": "skyflow.options.display_name",
+                    "values": [
+                        "ScratchTable"
+                    ]
+                }
+            ],
+            "properties": {
+                "name": "",
+                "description": "",
+                "references": ""
+            }
+        }
+    ],
+    "tags": []
+}
