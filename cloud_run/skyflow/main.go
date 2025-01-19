@@ -371,31 +371,16 @@ func handleTokenizeValue(req BigQueryRequest) (*BigQueryResponse, error) {
     if err != nil {
         if strings.Contains(err.Error(), "404") {
             log.Printf("Skyflow returned 404 for value: %s, returning empty string", value)
-            promise.token = ""
-            close(promise.done)
-            inFlightRequests.Delete(value)
-            return &BigQueryResponse{Replies: []interface{}{""}}, nil
+            return completeTokenPromise(promise, value, "", nil)
         }
-        promise.err = err
-        close(promise.done)
-        inFlightRequests.Delete(value)
-        return nil, err
+        return completeTokenPromise(promise, value, "", err)
     }
 
     if len(tokenResp.Records) == 0 {
-        err = fmt.Errorf("no records in response")
-        promise.err = err
-        close(promise.done)
-        inFlightRequests.Delete(value)
-        return nil, err
+        return completeTokenPromise(promise, value, "", fmt.Errorf("no records in response"))
     }
 
-    // Store result and signal completion
-    promise.token = tokenResp.Records[0].Token
-    close(promise.done)
-    inFlightRequests.Delete(value)
-
-    return &BigQueryResponse{Replies: []interface{}{tokenResp.Records[0].Token}}, nil
+    return completeTokenPromise(promise, value, tokenResp.Records[0].Token, nil)
 }
 
 // handleTokenizeTable handles table tokenization requests
@@ -426,28 +411,18 @@ func handleTokenizeTable(req BigQueryRequest) (*BigQueryResponse, error) {
         return nil, fmt.Errorf("error querying BigQuery: %v", err)
     }
 
-    // Get batch sizes from environment variables
-    skyflowBatchSize := 25 // default
-    if batchStr := os.Getenv("SKYFLOW_INSERT_BATCH_SIZE"); batchStr != "" {
-        if val, err := strconv.Atoi(batchStr); err == nil && val > 0 {
-            skyflowBatchSize = val
-        }
-    }
+    // Get batch sizes
+    skyflowBatchSize := getBatchSize("SKYFLOW_INSERT_BATCH_SIZE", 25)
+    bigqueryBatchSize := getBatchSize("BIGQUERY_UPDATE_BATCH_SIZE", 1000)
 
-    bigqueryBatchSize := 1000 // default
-    if batchStr := os.Getenv("BIGQUERY_UPDATE_BATCH_SIZE"); batchStr != "" {
-        if val, err := strconv.Atoi(batchStr); err == nil && val > 0 {
-            bigqueryBatchSize = val
-        }
-    }
-
-    // Process values in batches for each column
+    // Initialize column token maps
     columnTokenMaps := make(map[string]map[string]string) // column -> (original -> token)
     for _, column := range columnList {
         columnTokenMaps[column] = make(map[string]string)
     }
 
-    batch := make([]Record, 0, skyflowBatchSize)
+    // Prepare records for batch processing
+    records := make([]Record, 0)
     for _, row := range bqData {
         for colIdx, column := range columnList {
             value := row[colIdx]
@@ -463,60 +438,52 @@ func handleTokenizeTable(req BigQueryRequest) (*BigQueryResponse, error) {
                 continue
             }
 
-            batch = append(batch, Record{
+            records = append(records, Record{
                 Fields: map[string]string{
                     "pii": strValue,
                 },
                 Table: column, // Use column name to track which column this record belongs to
             })
-
-            // When batch is full, send the request
-            if len(batch) == skyflowBatchSize {
-                if err := processBatch(batch, columnTokenMaps, req.SessionUser); err != nil {
-                    return nil, fmt.Errorf("error processing batch: %v", err)
-                }
-                batch = make([]Record, 0, skyflowBatchSize)
-            }
         }
     }
 
-    // Process any remaining records in the final batch
-    if len(batch) > 0 {
+    // Process records in batches
+    processor := func(batch []Record) ([]Record, error) {
         if err := processBatch(batch, columnTokenMaps, req.SessionUser); err != nil {
-            return nil, fmt.Errorf("error processing final batch: %v", err)
+            return nil, fmt.Errorf("error processing batch: %v", err)
         }
+        return batch, nil
     }
 
-    // Process updates in batches to avoid query size limits
+    _, err = batchProcessor(records, skyflowBatchSize, processor)
+    if err != nil {
+        return nil, err
+    }
+
+    // Process updates in batches
     for column, valueTokenMap := range columnTokenMaps {
         if len(valueTokenMap) == 0 {
             continue
         }
 
         // Convert map to slices for batch processing
-        origValues := make([]string, 0, len(valueTokenMap))
-        tokenValues := make([]string, 0, len(valueTokenMap))
+        type updatePair struct {
+            original string
+            token    string
+        }
+        pairs := make([]updatePair, 0, len(valueTokenMap))
         for origValue, tokenVal := range valueTokenMap {
-            origValues = append(origValues, origValue)
-            tokenValues = append(tokenValues, tokenVal)
+            pairs = append(pairs, updatePair{origValue, tokenVal})
         }
 
-        // Process in batches
-        for i := 0; i < len(origValues); i += bigqueryBatchSize {
-            end := i + bigqueryBatchSize
-            if end > len(origValues) {
-                end = len(origValues)
-            }
-
-            batchOrig := origValues[i:end]
-            batchTokens := tokenValues[i:end]
-
-            cases := make([]string, 0, len(batchOrig))
-            for j := range batchOrig {
+        // Process updates in batches
+        processor := func(batch []updatePair) ([]updatePair, error) {
+            cases := make([]string, 0, len(batch))
+            for _, pair := range batch {
                 cases = append(cases, fmt.Sprintf("WHEN %s = '%s' THEN '%s'",
                     column,
-                    strings.ReplaceAll(batchOrig[j], "'", "\\'"), // Escape single quotes
-                    batchTokens[j]))
+                    strings.ReplaceAll(pair.original, "'", "\\'"), // Escape single quotes
+                    pair.token))
             }
 
             // Build and execute update query for this batch
@@ -532,14 +499,27 @@ WHERE %s IN (%s)`,
                 column,
                 column,
                 strings.Join(buildOriginalValuesList(
-                    mapFromSlices(batchOrig, batchTokens)), ","))
+                    mapFromSlices(
+                        func() ([]string, []string) {
+                            orig := make([]string, len(batch))
+                            tokens := make([]string, len(batch))
+                            for i, pair := range batch {
+                                orig[i] = pair.original
+                                tokens[i] = pair.token
+                            }
+                            return orig, tokens
+                        }())), ","))
 
-            log.Printf("Executing batch update query for column %s (%d/%d values)",
-                column, end, len(origValues))
-
+            log.Printf("Executing batch update query for column %s (%d values)", column, len(batch))
             if err := executeUpdate(updateQuery); err != nil {
                 return nil, fmt.Errorf("error updating table: %v", err)
             }
+            return batch, nil
+        }
+
+        _, err = batchProcessor(pairs, bigqueryBatchSize, processor)
+        if err != nil {
+            return nil, err
         }
     }
 
@@ -587,54 +567,11 @@ func processBatch(batch []Record, columnTokenMaps map[string]map[string]string, 
 // handleDetokenize handles detokenization requests
 func handleDetokenize(req BigQueryRequest, userRoles []string) (*BigQueryResponse, error) {
     // Map user's Google roles to a Skyflow role ID
-    var roleID string
-    log.Printf("Mapping user roles to Skyflow role ID. User roles: %v", userRoles)
-    
-    for _, userRole := range userRoles {
-        log.Printf("Checking role: %s", userRole)
-        
-        // Check each role mapping to find a match
-        for mappingName, roleMapping := range roleScopes {
-            log.Printf("Checking mapping '%s' with roles: %v", mappingName, roleMapping.googleRoles)
-            for _, googleRole := range roleMapping.googleRoles {
-                if googleRole == userRole {
-                    roleID = roleMapping.skyflowRoleID
-                    log.Printf("Found matching role! Using Skyflow role ID: %s", roleID)
-                    break
-                }
-            }
-            if roleID != "" {
-                break
-            }
-        }
-        if roleID != "" {
-            break
-        }
-    }
-    
-    // If no mapped role is found, default to no access
-    if roleID == "" {
-        roleID = SkyflowRoleNoAccess
-        log.Printf("No matching role found, defaulting to SkyflowRoleNoAccess: %s", roleID)
-    }
-
-    // Get batch size from environment variable
-    batchSize := 25 // default
-    if batchStr := os.Getenv("SKYFLOW_DETOKENIZE_BATCH_SIZE"); batchStr != "" {
-        if val, err := strconv.Atoi(batchStr); err == nil && val > 0 {
-            batchSize = val
-        }
-    }
+    roleID, _ := hasRequiredRole(userRoles, []string{})
+    batchSize := getBatchSize("SKYFLOW_DETOKENIZE_BATCH_SIZE", 25)
 
     // Process tokens in batches
-    allResponses := make([]interface{}, 0, len(req.Calls))
-    for i := 0; i < len(req.Calls); i += batchSize {
-        end := i + batchSize
-        if end > len(req.Calls) {
-            end = len(req.Calls)
-        }
-
-        batch := req.Calls[i:end]
+    processor := func(batch [][]interface{}) ([]interface{}, error) {
         detokenizeReq := DetokenizeRequest{
             DetokenizationParameters: make([]TokenParam, len(batch)),
         }
@@ -669,23 +606,25 @@ func handleDetokenize(req BigQueryRequest, userRoles []string) (*BigQueryRespons
         resp, err := makeSkyflowAPIRequest[DetokenizeRequest, DetokenizeResponse]("/detokenize", detokenizeReq, req.SessionUser, roleID)
         if err != nil {
             log.Printf("Error making Skyflow request: %v", err)
-            for range batch {
-                allResponses = append(allResponses, nil)
-            }
-            continue
+            return make([]interface{}, len(batch)), nil
         }
 
         // Map responses back to original order
+        results := make([]interface{}, len(batch))
         for j := range batch {
             if j < len(resp.Records) && resp.Records[j].Error == nil {
-                allResponses = append(allResponses, resp.Records[j].Value)
-            } else {
-                allResponses = append(allResponses, nil)
+                results[j] = resp.Records[j].Value
             }
         }
+        return results, nil
     }
 
-    return &BigQueryResponse{Replies: allResponses}, nil
+    results, err := batchProcessor(req.Calls, batchSize, processor)
+    if err != nil {
+        return nil, err
+    }
+
+    return &BigQueryResponse{Replies: results}, nil
 }
 
 // getUserRoles fetches user roles from Cloud Resource Manager
@@ -802,44 +741,77 @@ func getBearerToken(userEmail string, roleID string) (string, error) {
     return accessToken, nil
 }
 
+// secretManager provides access to Google Cloud Secret Manager
+type secretManager struct {
+    client    *secretmanager.Client
+    projectID string
+    prefix    string
+}
+
+// newSecretManager creates a new Secret Manager client
+func newSecretManager() (*secretManager, error) {
+    ctx := context.Background()
+    client, err := secretmanager.NewClient(ctx)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create Secret Manager client: %v", err)
+    }
+
+    projectID := os.Getenv("PROJECT_ID")
+    if projectID == "" {
+        return nil, fmt.Errorf("PROJECT_ID environment variable not set")
+    }
+
+    prefix := os.Getenv("PREFIX")
+    if prefix == "" {
+        return nil, fmt.Errorf("PREFIX environment variable not set")
+    }
+
+    return &secretManager{
+        client:    client,
+        projectID: projectID,
+        prefix:    prefix,
+    }, nil
+}
+
+// getSecretData gets a secret's data from Secret Manager
+func (sm *secretManager) getSecretData(ctx context.Context, secretName string) ([]byte, error) {
+    name := fmt.Sprintf("projects/%s/secrets/%s_%s/versions/latest",
+        sm.projectID, sm.prefix, secretName)
+    
+    result, err := sm.client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
+        Name: name,
+    })
+    if err != nil {
+        return nil, fmt.Errorf("failed to access secret version: %v", err)
+    }
+
+    return result.Payload.Data, nil
+}
+
+// Close closes the Secret Manager client
+func (sm *secretManager) Close() error {
+    return sm.client.Close()
+}
+
 // getCredentials loads credentials from Secret Manager
 func getCredentials() (*SkyflowCredentials, error) {
     if credentials != nil {
         return credentials, nil
     }
 
-    ctx := context.Background()
-    client, err := secretmanager.NewClient(ctx)
+    sm, err := newSecretManager()
     if err != nil {
-        return nil, fmt.Errorf("failed to create secretmanager client: %v", err)
+        return nil, err
     }
-    defer client.Close()
+    defer sm.Close()
 
-    // Get project ID from environment variable
-    projectID := os.Getenv("PROJECT_ID")
-    if projectID == "" {
-        return nil, fmt.Errorf("PROJECT_ID environment variable not set")
-    }
-
-    // Get prefix from environment variable
-    prefix := os.Getenv("PREFIX")
-    if prefix == "" {
-        return nil, fmt.Errorf("PREFIX environment variable not set")
-    }
-
-    // Access the latest version of the secret
-    secretName := fmt.Sprintf("projects/%s/secrets/%s_credentials/versions/latest", projectID, prefix)
-    result, err := client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
-        Name: secretName,
-    })
+    data, err := sm.getSecretData(context.Background(), "credentials")
     if err != nil {
-        return nil, fmt.Errorf("failed to access secret version: %v", err)
+        return nil, err
     }
 
-    // Parse the JSON data
     var creds SkyflowCredentials
-    err = json.Unmarshal(result.Payload.Data, &creds)
-    if err != nil {
+    if err := json.Unmarshal(data, &creds); err != nil {
         return nil, fmt.Errorf("failed to unmarshal credentials: %v", err)
     }
 
@@ -849,32 +821,13 @@ func getCredentials() (*SkyflowCredentials, error) {
 
 // getSecret gets a secret from Secret Manager
 func getSecret(secretName string) ([]byte, error) {
-    ctx := context.Background()
-    client, err := secretmanager.NewClient(ctx)
+    sm, err := newSecretManager()
     if err != nil {
-        return nil, fmt.Errorf("failed to create Secret Manager client: %w", err)
+        return nil, err
     }
-    defer client.Close()
+    defer sm.Close()
 
-    projectID := os.Getenv("PROJECT_ID")
-    if projectID == "" {
-        return nil, fmt.Errorf("PROJECT_ID environment variable is not set")
-    }
-
-    prefix := os.Getenv("PREFIX")
-    if prefix == "" {
-        return nil, fmt.Errorf("PREFIX environment variable is not set")
-    }
-
-    accessRequest := &secretmanagerpb.AccessSecretVersionRequest{
-        Name: fmt.Sprintf("projects/%s/secrets/%s_%s/versions/latest", projectID, prefix, secretName),
-    }
-    result, err := client.AccessSecretVersion(ctx, accessRequest)
-    if err != nil {
-        return nil, fmt.Errorf("failed to access secret version: %w", err)
-    }
-
-    return result.Payload.Data, nil
+    return sm.getSecretData(context.Background(), secretName)
 }
 
 // generateJWTToken generates a JWT token for Skyflow authentication
@@ -941,17 +894,38 @@ func generateJWTToken(creds *SkyflowCredentials, userEmail string) (string, erro
     return unsignedToken + "." + encodedSignature, nil
 }
 
-// queryBigQuery executes a query and returns the results
-func queryBigQuery(query string) ([][]interface{}, error) {
-    ctx := context.Background()
+// bigQueryClient provides access to Google BigQuery
+type bigQueryClient struct {
+    client    *bigquery.Client
+    projectID string
+}
 
-    client, err := bigquery.NewClient(ctx, os.Getenv("PROJECT_ID"))
-    if err != nil {
-        return nil, fmt.Errorf("error creating BigQuery client: %v", err)
+// newBigQueryClient creates a new BigQuery client
+func newBigQueryClient() (*bigQueryClient, error) {
+    projectID := os.Getenv("PROJECT_ID")
+    if projectID == "" {
+        return nil, fmt.Errorf("PROJECT_ID environment variable not set")
     }
-    defer client.Close()
 
-    q := client.Query(query)
+    client, err := bigquery.NewClient(context.Background(), projectID)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create BigQuery client: %v", err)
+    }
+
+    return &bigQueryClient{
+        client:    client,
+        projectID: projectID,
+    }, nil
+}
+
+// Close closes the BigQuery client
+func (bq *bigQueryClient) Close() error {
+    return bq.client.Close()
+}
+
+// Query executes a query and returns the results
+func (bq *bigQueryClient) Query(ctx context.Context, query string) ([][]interface{}, error) {
+    q := bq.client.Query(query)
     it, err := q.Read(ctx)
     if err != nil {
         return nil, fmt.Errorf("error executing query: %v", err)
@@ -967,27 +941,20 @@ func queryBigQuery(query string) ([][]interface{}, error) {
         if err != nil {
             return nil, fmt.Errorf("error reading row: %v", err)
         }
-    // Convert BigQuery Values to interface{} slice
-    interfaceRow := make([]interface{}, len(row))
-    for i, v := range row {
-        interfaceRow[i] = v
-    }
-    rows = append(rows, interfaceRow)
+        // Convert BigQuery Values to interface{} slice
+        interfaceRow := make([]interface{}, len(row))
+        for i, v := range row {
+            interfaceRow[i] = v
+        }
+        rows = append(rows, interfaceRow)
     }
 
     return rows, nil
 }
 
-// executeUpdate executes an update query
-func executeUpdate(query string) error {
-    ctx := context.Background()
-    client, err := bigquery.NewClient(ctx, os.Getenv("PROJECT_ID"))
-    if err != nil {
-        return fmt.Errorf("error creating BigQuery client: %v", err)
-    }
-    defer client.Close()
-
-    q := client.Query(query)
+// Update executes an update query
+func (bq *bigQueryClient) Update(ctx context.Context, query string) error {
+    q := bq.client.Query(query)
     job, err := q.Run(ctx)
     if err != nil {
         return fmt.Errorf("error executing update: %v", err)
@@ -1003,6 +970,62 @@ func executeUpdate(query string) error {
     }
 
     return nil
+}
+
+// queryBigQuery executes a query and returns the results
+func queryBigQuery(query string) ([][]interface{}, error) {
+    bq, err := newBigQueryClient()
+    if err != nil {
+        return nil, err
+    }
+    defer bq.Close()
+
+    return bq.Query(context.Background(), query)
+}
+
+// executeUpdate executes an update query
+func executeUpdate(query string) error {
+    bq, err := newBigQueryClient()
+    if err != nil {
+        return err
+    }
+    defer bq.Close()
+
+    return bq.Update(context.Background(), query)
+}
+
+// batchProcessor is a generic function to process items in batches
+func batchProcessor[T any, R any](items []T, batchSize int, processor func([]T) ([]R, error)) ([]R, error) {
+    if batchSize <= 0 {
+        batchSize = 25 // default batch size
+    }
+
+    results := make([]R, 0, len(items))
+    for i := 0; i < len(items); i += batchSize {
+        end := i + batchSize
+        if end > len(items) {
+            end = len(items)
+        }
+
+        batch := items[i:end]
+        batchResults, err := processor(batch)
+        if err != nil {
+            return nil, fmt.Errorf("error processing batch: %v", err)
+        }
+        results = append(results, batchResults...)
+    }
+
+    return results, nil
+}
+
+// getBatchSize gets a batch size from environment variable with a default value
+func getBatchSize(envVar string, defaultSize int) int {
+    if batchStr := os.Getenv(envVar); batchStr != "" {
+        if val, err := strconv.Atoi(batchStr); err == nil && val > 0 {
+            return val
+        }
+    }
+    return defaultSize
 }
 
 // Helper function to build list of original values for IN clause
@@ -1024,9 +1047,50 @@ func mapFromSlices(keys, values []string) map[string]string {
     return m
 }
 
+// skyflowClient represents a client for making Skyflow API requests
+type skyflowClient struct {
+    baseURL     string
+    accountID   string
+    httpClient  *http.Client
+}
+
+// newSkyflowClient creates a new Skyflow API client
+func newSkyflowClient() *skyflowClient {
+    return &skyflowClient{
+        baseURL:    os.Getenv("SKYFLOW_VAULT_URL"),
+        accountID:  os.Getenv("SKYFLOW_ACCOUNT_ID"),
+        httpClient: &http.Client{},
+    }
+}
+
+// makeRequest makes a request to the Skyflow API with proper headers and authentication
+func (c *skyflowClient) makeRequest(method, endpoint string, body []byte, bearerToken string) (*http.Response, error) {
+    req, err := http.NewRequest(method, c.baseURL+endpoint, bytes.NewBuffer(body))
+    if err != nil {
+        return nil, fmt.Errorf("error creating request: %v", err)
+    }
+
+    // Set standard headers
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Accept", "application/json")
+    req.Header.Set("Authorization", "Bearer "+bearerToken)
+    req.Header.Set("X-SKYFLOW-ACCOUNT-ID", c.accountID)
+
+    return c.httpClient.Do(req)
+}
+
+// completeTokenPromise completes a token promise and returns a BigQuery response
+func completeTokenPromise(promise *tokenPromise, value string, token string, err error) (*BigQueryResponse, error) {
+    promise.token = token
+    promise.err = err
+    close(promise.done)
+    inFlightRequests.Delete(value)
+    return &BigQueryResponse{Replies: []interface{}{token}}, err
+}
+
 // makeSkyflowAPIRequest makes a generic request to the Skyflow API
 func makeSkyflowAPIRequest[Req any, Resp any](endpoint string, req Req, userEmail string, roleID string) (*Resp, error) {
-    skyflowURL := os.Getenv("SKYFLOW_VAULT_URL") + endpoint
+    client := newSkyflowClient()
 
     // Get bearer token with user context and role ID
     bearerToken, err := getBearerToken(userEmail, roleID)
@@ -1039,18 +1103,7 @@ func makeSkyflowAPIRequest[Req any, Resp any](endpoint string, req Req, userEmai
         return nil, fmt.Errorf("error marshaling request: %v", err)
     }
 
-    httpReq, err := http.NewRequest("POST", skyflowURL, bytes.NewBuffer(jsonData))
-    if err != nil {
-        return nil, fmt.Errorf("error creating request: %v", err)
-    }
-
-    httpReq.Header.Set("Content-Type", "application/json")
-    httpReq.Header.Set("Accept", "application/json")
-    httpReq.Header.Set("Authorization", "Bearer "+bearerToken)
-    httpReq.Header.Set("X-SKYFLOW-ACCOUNT-ID", os.Getenv("SKYFLOW_ACCOUNT_ID"))
-
-    client := &http.Client{}
-    resp, err := client.Do(httpReq)
+    resp, err := client.makeRequest("POST", endpoint, jsonData, bearerToken)
     if err != nil {
         return nil, fmt.Errorf("error making request: %v", err)
     }
