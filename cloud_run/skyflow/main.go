@@ -39,25 +39,67 @@ const (
     minPiiLength = 7
 )
 
-// Role types
+// Skyflow Role IDs (from your Skyflow Vault configuration)
 const (
-    RoleSkyflowAdmin     = "skyflow_admin"
-    RoleSkyflowCS        = "skyflow_cs"
-    RoleSkyflowMarketing = "skyflow_marketing"
+    SkyflowRoleFullAccess   = "ufea24a62a2d461e97f155b81c5da5b7" // ID of Skyflow Role having FULL PII access
+    SkyflowRoleMaskedAccess = "ac917e7c350543a2990d0e4bff61fc00" // ID of Skyflow Role having MASKED PII access
+    SkyflowRoleNoAccess     = "oe572f8d5cef4077b182c2c6a549bf16" // ID of Skyflow Role having NO PII access (default for unmapped roles)
 )
 
-// Role to Skyflow ID mapping
-var roleScopes = map[string]string{
-    RoleSkyflowAdmin:     "ufea24a62a2d461e97f155b81c5da5b7",   // Full access
-    RoleSkyflowCS:        "ac917e7c350543a2990d0e4bff61fc00",   // Masked access
-    RoleSkyflowMarketing: "oe572f8d5cef4077b182c2c6a549bf16",   // No access
+// Google IAM roles that map to specific Skyflow roles
+// To add a new role:
+// 1. Add the role name constant here (must match the Google IAM role value, not display name)
+// 2. Add it to the appropriate roleScopes mapping below to determine its Skyflow access level
+const (
+    RoleSkyflowAdmin     = "projects/solutionseng/roles/skyflow_admin"     // Google IAM role for full PII access
+    RoleSkyflowCS        = "projects/solutionseng/roles/skyflow_cs"        // Google IAM role for masked PII access
+    RoleSkyflowMarketing = "projects/solutionseng/roles/skyflow_marketing" // Google IAM role for no PII access
+    // Add other Google IAM roles here, then map them into Skyflow PII access patterns below
+)
+
+// Role mapping configuration
+type RoleMapping struct {
+    skyflowRoleID string   // The Skyflow role ID to use
+    googleRoles []string   // List of Google IAM roles that map to this Skyflow role
+}
+
+// Google Role to Skyflow Role mapping
+// To map a new Google IAM role:
+// 1. Add the role constant above
+// 2. Add it to the appropriate googleRoles list below based on desired access level
+// 3. Any Google IAM role not listed here will automatically map to SkyflowRoleNoAccess
+var roleScopes = map[string]RoleMapping{
+    "full_access": {
+        skyflowRoleID: SkyflowRoleFullAccess,
+        googleRoles: []string{
+            RoleSkyflowAdmin,
+            // Add other Google IAM roles that need full PII access
+            // e.g. "data_admin", "security_admin"
+        },
+    },
+    "masked_access": {
+        skyflowRoleID: SkyflowRoleMaskedAccess,
+        googleRoles: []string{
+            RoleSkyflowCS,
+            // Add other Google IAM roles that need masked PII access
+            // e.g. "support_agent", "analyst"
+        },
+    },
+    "no_access": {
+        skyflowRoleID: SkyflowRoleNoAccess,
+        googleRoles: []string{
+            RoleSkyflowMarketing,
+            // Add other Google IAM roles that need no PII access
+            // e.g. "viewer", "auditor"
+        },
+    },
 }
 
 // Operation to required roles mapping
 var operationRoles = map[string][]string{
-    OpTokenizeValue: {RoleSkyflowAdmin, RoleSkyflowCS, RoleSkyflowMarketing},
-    OpTokenizeTable: {RoleSkyflowAdmin},
-    OpDetokenize:    {RoleSkyflowAdmin, RoleSkyflowCS, RoleSkyflowMarketing},
+    OpTokenizeValue: {}, // Allow any role to run this BigQuery Function (controls only ability to run BigQuery function itself. PII access is controlled at Skyflow level via role mappings above)
+    OpTokenizeTable: {}, // Allow any role to run this BigQuery Function (controls only ability to run BigQuery function itself. PII access is controlled at Skyflow level via role mappings above)
+    OpDetokenize:    {}, // Allow any role to run this BigQuery Function (controls only ability to run BigQuery function itself. PII access is controlled at Skyflow level via role mappings above)
 }
 
 // Cache structure for tokenization results (within same request)
@@ -150,31 +192,47 @@ type DetokenizedRecord struct {
     Error     interface{} `json:"error"`
 }
 
-// hasRequiredRole checks if the user has any of the required roles
+// hasRequiredRole checks if the user has any of the required roles and returns the appropriate Skyflow role ID.
+// For operations with no required roles (empty requiredRoles list), any role is allowed but will be mapped
+// to its corresponding Skyflow role ID based on the roleScopes mapping. Unmapped roles default to SkyflowRoleNoAccess.
 func hasRequiredRole(userRoles []string, requiredRoles []string) (string, bool) {
+    // If no roles are required, we just need to map the user's role to a Skyflow role
+    if len(requiredRoles) == 0 {
+        // Check each of the user's Google IAM roles to see if any are mapped
+        for _, userRole := range userRoles {
+            // Find which Skyflow role this Google role maps to
+            for _, roleMapping := range roleScopes {
+                for _, googleRole := range roleMapping.googleRoles {
+                    if googleRole == userRole {
+                        return roleMapping.skyflowRoleID, true
+                    }
+                }
+            }
+        }
+        // No mapped role found, default to no access
+        return SkyflowRoleNoAccess, true
+    }
+
+    // For operations with required roles, check if user has any of them
     for _, userRole := range userRoles {
-        roleName := extractRoleName(userRole)
         for _, required := range requiredRoles {
-            if roleName == required {
-                return roleName, true
+            if userRole == required {
+                // User has a required role, find its Skyflow mapping
+                for _, roleMapping := range roleScopes {
+                    for _, googleRole := range roleMapping.googleRoles {
+                        if googleRole == userRole {
+                            return roleMapping.skyflowRoleID, true
+                        }
+                    }
+                }
+                // Required role exists but isn't mapped, default to no access
+                return SkyflowRoleNoAccess, true
             }
         }
     }
-    return "", false
-}
-
-// extractRoleName gets the base role name from a full role string
-func extractRoleName(role string) string {
-    if strings.HasPrefix(role, "roles/") {
-        return role[len("roles/"):]
-    }
-    if strings.HasPrefix(role, "projects/") {
-        parts := strings.Split(role, "/")
-        if len(parts) >= 4 && parts[2] == "roles" {
-            return parts[3]
-        }
-    }
-    return role
+    
+    // User has none of the required roles
+    return SkyflowRoleNoAccess, false
 }
 
 func main() {
@@ -238,7 +296,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
     }
 
     // Check if user has required role
-    roleName, hasRole := hasRequiredRole(roles, operationRoles[operation])
+    _, hasRole := hasRequiredRole(roles, operationRoles[operation])
     if !hasRole {
         http.Error(w, fmt.Sprintf("User does not have required role for %s operation", operation), http.StatusForbidden)
         return
@@ -252,7 +310,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
     case OpTokenizeTable:
         response, err = handleTokenizeTable(bqReq)
     case OpDetokenize:
-        response, err = handleDetokenize(bqReq, roleName)
+        response, err = handleDetokenize(bqReq, roles)
     default:
         http.Error(w, fmt.Sprintf("Unknown operation: %s", operation), http.StatusBadRequest)
         return
@@ -308,75 +366,16 @@ func handleTokenizeValue(req BigQueryRequest) (*BigQueryResponse, error) {
         },
     }
 
-    // Get bearer token
-    bearerToken, err := getBearerToken(req.SessionUser, "")
-    if err != nil {
-        promise.err = err
-        close(promise.done)
-        inFlightRequests.Delete(value)
-        return nil, err
-    }
-
     // Make request
-    jsonData, err := json.Marshal(skyflowReq)
+    tokenResp, err := makeSkyflowAPIRequest[TokenizeValueRequest, TokenizeValueResponse]("/tokenize", skyflowReq, req.SessionUser, "")
     if err != nil {
-        promise.err = err
-        close(promise.done)
-        inFlightRequests.Delete(value)
-        return nil, err
-    }
-
-    skyflowURL := os.Getenv("SKYFLOW_VAULT_URL") + "/tokenize"
-    httpReq, err := http.NewRequest("POST", skyflowURL, bytes.NewBuffer(jsonData))
-    if err != nil {
-        promise.err = err
-        close(promise.done)
-        inFlightRequests.Delete(value)
-        return nil, err
-    }
-
-    httpReq.Header.Set("Content-Type", "application/json")
-    httpReq.Header.Set("Accept", "application/json")
-    httpReq.Header.Set("Authorization", "Bearer "+bearerToken)
-    httpReq.Header.Set("X-SKYFLOW-ACCOUNT-ID", os.Getenv("SKYFLOW_ACCOUNT_ID"))
-
-    client := &http.Client{}
-    resp, err := client.Do(httpReq)
-    if err != nil {
-        promise.err = err
-        close(promise.done)
-        inFlightRequests.Delete(value)
-        return nil, err
-    }
-    defer resp.Body.Close()
-
-    // Handle 404 by returning empty string
-    if resp.StatusCode == http.StatusNotFound {
-        log.Printf("Skyflow returned 404 for value: %s, returning empty string", value)
-        promise.token = ""
-        close(promise.done)
-        inFlightRequests.Delete(value)
-        return &BigQueryResponse{Replies: []interface{}{""}}, nil
-    }
-
-    body, err := ioutil.ReadAll(resp.Body)
-    if err != nil {
-        promise.err = err
-        close(promise.done)
-        inFlightRequests.Delete(value)
-        return nil, err
-    }
-
-    if resp.StatusCode != http.StatusOK {
-        err = fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
-        promise.err = err
-        close(promise.done)
-        inFlightRequests.Delete(value)
-        return nil, err
-    }
-
-    var tokenResp TokenizeValueResponse
-    if err := json.Unmarshal(body, &tokenResp); err != nil {
+        if strings.Contains(err.Error(), "404") {
+            log.Printf("Skyflow returned 404 for value: %s, returning empty string", value)
+            promise.token = ""
+            close(promise.done)
+            inFlightRequests.Delete(value)
+            return &BigQueryResponse{Replies: []interface{}{""}}, nil
+        }
         promise.err = err
         close(promise.done)
         inFlightRequests.Delete(value)
@@ -448,12 +447,6 @@ func handleTokenizeTable(req BigQueryRequest) (*BigQueryResponse, error) {
         columnTokenMaps[column] = make(map[string]string)
     }
 
-    // Get bearer token
-    bearerToken, err := getBearerToken(req.SessionUser, "")
-    if err != nil {
-        return nil, err
-    }
-
     batch := make([]Record, 0, skyflowBatchSize)
     for _, row := range bqData {
         for colIdx, column := range columnList {
@@ -479,7 +472,7 @@ func handleTokenizeTable(req BigQueryRequest) (*BigQueryResponse, error) {
 
             // When batch is full, send the request
             if len(batch) == skyflowBatchSize {
-                if err := processBatch(batch, columnTokenMaps, bearerToken); err != nil {
+                if err := processBatch(batch, columnTokenMaps, req.SessionUser); err != nil {
                     return nil, fmt.Errorf("error processing batch: %v", err)
                 }
                 batch = make([]Record, 0, skyflowBatchSize)
@@ -489,7 +482,7 @@ func handleTokenizeTable(req BigQueryRequest) (*BigQueryResponse, error) {
 
     // Process any remaining records in the final batch
     if len(batch) > 0 {
-        if err := processBatch(batch, columnTokenMaps, bearerToken); err != nil {
+        if err := processBatch(batch, columnTokenMaps, req.SessionUser); err != nil {
             return nil, fmt.Errorf("error processing final batch: %v", err)
         }
     }
@@ -562,53 +555,21 @@ WHERE %s IN (%s)`,
 }
 
 // processBatch handles a batch of records for tokenization
-func processBatch(batch []Record, columnTokenMaps map[string]map[string]string, bearerToken string) error {
+func processBatch(batch []Record, columnTokenMaps map[string]map[string]string, userEmail string) error {
     skyflowReq := TokenizeTableRequest{
         Records:      batch,
         Tokenization: true,
     }
 
     // Make request
-    jsonData, err := json.Marshal(skyflowReq)
-    if err != nil {
-        return fmt.Errorf("error marshaling request: %v", err)
-    }
-
-    skyflowURL := os.Getenv("SKYFLOW_VAULT_URL") + "/" + os.Getenv("SKYFLOW_TABLE_NAME")
-    httpReq, err := http.NewRequest("POST", skyflowURL, bytes.NewBuffer(jsonData))
-    if err != nil {
-        return fmt.Errorf("error creating request: %v", err)
-    }
-
-    httpReq.Header.Set("Content-Type", "application/json")
-    httpReq.Header.Set("Accept", "application/json")
-    httpReq.Header.Set("Authorization", "Bearer "+bearerToken)
-    httpReq.Header.Set("X-SKYFLOW-ACCOUNT-ID", os.Getenv("SKYFLOW_ACCOUNT_ID"))
-
-    client := &http.Client{}
-    resp, err := client.Do(httpReq)
-    if err != nil {
-        return fmt.Errorf("error making request: %v", err)
-    }
-    defer resp.Body.Close()
-
-    body, err := ioutil.ReadAll(resp.Body)
-    if err != nil {
-        return fmt.Errorf("error reading response: %v", err)
-    }
-
-    if resp.StatusCode != http.StatusOK {
-        return fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
-    }
-
-    var skyflowResp struct {
+    skyflowResp, err := makeSkyflowAPIRequest[TokenizeTableRequest, struct {
         Records []struct {
             SkyflowID string            `json:"skyflow_id"`
             Tokens    map[string]string `json:"tokens"`
         } `json:"records"`
-    }
-    if err := json.Unmarshal(body, &skyflowResp); err != nil {
-        return fmt.Errorf("error unmarshaling response: %v", err)
+    }]("/"+os.Getenv("SKYFLOW_TABLE_NAME"), skyflowReq, userEmail, "")
+    if err != nil {
+        return fmt.Errorf("error making request: %v", err)
     }
 
     // Map tokens back to their respective columns
@@ -624,11 +585,37 @@ func processBatch(batch []Record, columnTokenMaps map[string]map[string]string, 
 }
 
 // handleDetokenize handles detokenization requests
-func handleDetokenize(req BigQueryRequest, roleName string) (*BigQueryResponse, error) {
-    // Get role scope
-    roleID := roleScopes[roleName]
+func handleDetokenize(req BigQueryRequest, userRoles []string) (*BigQueryResponse, error) {
+    // Map user's Google roles to a Skyflow role ID
+    var roleID string
+    log.Printf("Mapping user roles to Skyflow role ID. User roles: %v", userRoles)
+    
+    for _, userRole := range userRoles {
+        log.Printf("Checking role: %s", userRole)
+        
+        // Check each role mapping to find a match
+        for mappingName, roleMapping := range roleScopes {
+            log.Printf("Checking mapping '%s' with roles: %v", mappingName, roleMapping.googleRoles)
+            for _, googleRole := range roleMapping.googleRoles {
+                if googleRole == userRole {
+                    roleID = roleMapping.skyflowRoleID
+                    log.Printf("Found matching role! Using Skyflow role ID: %s", roleID)
+                    break
+                }
+            }
+            if roleID != "" {
+                break
+            }
+        }
+        if roleID != "" {
+            break
+        }
+    }
+    
+    // If no mapped role is found, default to no access
     if roleID == "" {
-        return nil, fmt.Errorf("invalid role: %s", roleName)
+        roleID = SkyflowRoleNoAccess
+        log.Printf("No matching role found, defaulting to SkyflowRoleNoAccess: %s", roleID)
     }
 
     // Get batch size from environment variable
@@ -678,7 +665,8 @@ func handleDetokenize(req BigQueryRequest, roleName string) (*BigQueryResponse, 
         }
 
         // Make Skyflow request
-        resp, err := makeSkyflowRequest(detokenizeReq, req.SessionUser, roleID)
+        log.Printf("Making request to Skyflow API with %d tokens", len(detokenizeReq.DetokenizationParameters))
+        resp, err := makeSkyflowAPIRequest[DetokenizeRequest, DetokenizeResponse]("/detokenize", detokenizeReq, req.SessionUser, roleID)
         if err != nil {
             log.Printf("Error making Skyflow request: %v", err)
             for range batch {
@@ -1036,9 +1024,9 @@ func mapFromSlices(keys, values []string) map[string]string {
     return m
 }
 
-// makeSkyflowRequest makes a request to the Skyflow API
-func makeSkyflowRequest(req DetokenizeRequest, userEmail string, roleID string) (*DetokenizeResponse, error) {
-    skyflowURL := os.Getenv("SKYFLOW_VAULT_URL") + "/detokenize"
+// makeSkyflowAPIRequest makes a generic request to the Skyflow API
+func makeSkyflowAPIRequest[Req any, Resp any](endpoint string, req Req, userEmail string, roleID string) (*Resp, error) {
+    skyflowURL := os.Getenv("SKYFLOW_VAULT_URL") + endpoint
 
     // Get bearer token with user context and role ID
     bearerToken, err := getBearerToken(userEmail, roleID)
@@ -1061,8 +1049,6 @@ func makeSkyflowRequest(req DetokenizeRequest, userEmail string, roleID string) 
     httpReq.Header.Set("Authorization", "Bearer "+bearerToken)
     httpReq.Header.Set("X-SKYFLOW-ACCOUNT-ID", os.Getenv("SKYFLOW_ACCOUNT_ID"))
 
-    log.Printf("Making request to Skyflow API with %d tokens", len(req.DetokenizationParameters))
-
     client := &http.Client{}
     resp, err := client.Do(httpReq)
     if err != nil {
@@ -1079,7 +1065,7 @@ func makeSkyflowRequest(req DetokenizeRequest, userEmail string, roleID string) 
         return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
     }
 
-    var skyflowResp DetokenizeResponse
+    var skyflowResp Resp
     if err := json.Unmarshal(body, &skyflowResp); err != nil {
         return nil, fmt.Errorf("error unmarshaling response: %v", err)
     }
