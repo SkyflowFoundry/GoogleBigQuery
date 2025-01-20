@@ -29,6 +29,97 @@ import (
     "time"
 )
 
+// RoleConfig represents the role configuration loaded from Secret Manager
+type RoleConfig struct {
+    DefaultRoleID string        `json:"defaultRoleID"` // Default Skyflow role ID for unmapped roles
+    RoleMappings  []RoleMapping `json:"roleMappings"`  // Direct mapping of Skyflow role IDs to Google roles
+}
+
+// RoleMapping represents a mapping between a Skyflow role ID and Google IAM roles
+type RoleMapping struct {
+    SkyflowRoleID string   `json:"skyflowRoleID"` // The Skyflow role ID to use
+    GoogleRoles   []string `json:"googleRoles"`   // List of Google IAM roles that map to this Skyflow role
+}
+
+var (
+    roleConfigCache struct {
+        sync.RWMutex
+        config    *RoleConfig
+        timestamp time.Time
+    }
+)
+
+const (
+    // Cache duration for role configuration
+    roleConfigCacheDuration = 30 * time.Second // Short duration to ensure updates are picked up quickly
+)
+
+// getRoleConfig safely retrieves the current role configuration, refreshing if needed
+func getRoleConfig() *RoleConfig {
+    roleConfigCache.RLock()
+    if roleConfigCache.config != nil && time.Since(roleConfigCache.timestamp) < roleConfigCacheDuration {
+        config := roleConfigCache.config
+        roleConfigCache.RUnlock()
+        log.Printf("[DEBUG] Using cached role configuration, age: %v", time.Since(roleConfigCache.timestamp))
+        return config
+    }
+    roleConfigCache.RUnlock()
+
+    // Cache miss or expired, acquire write lock
+    roleConfigCache.Lock()
+    defer roleConfigCache.Unlock()
+
+    // Double check after acquiring write lock
+    if roleConfigCache.config != nil && time.Since(roleConfigCache.timestamp) < roleConfigCacheDuration {
+        log.Printf("[DEBUG] Using cached role configuration after write lock, age: %v", time.Since(roleConfigCache.timestamp))
+        return roleConfigCache.config
+    }
+
+    // Load from Secret Manager
+    sm, err := newSecretManager()
+    if err != nil {
+        log.Printf("[ERROR] Failed to create Secret Manager client: %v", err)
+        if roleConfigCache.config != nil {
+            log.Printf("[WARN] Using stale role configuration, age: %v", time.Since(roleConfigCache.timestamp))
+            return roleConfigCache.config
+        }
+        log.Fatal("[FATAL] No role configuration available and failed to load from Secret Manager")
+    }
+    defer sm.Close()
+
+    data, err := sm.getSecretData(context.Background(), "role_mappings")
+    if err != nil {
+        log.Printf("[ERROR] Failed to load role mappings from Secret Manager: %v", err)
+        if roleConfigCache.config != nil {
+            log.Printf("[WARN] Using stale role configuration, age: %v", time.Since(roleConfigCache.timestamp))
+            return roleConfigCache.config
+        }
+        log.Fatal("[FATAL] No role configuration available and failed to load from Secret Manager")
+    }
+
+    var config RoleConfig
+    if err := json.Unmarshal(data, &config); err != nil {
+        log.Printf("[ERROR] Failed to unmarshal role configuration: %v", err)
+        if roleConfigCache.config != nil {
+            log.Printf("[WARN] Using stale role configuration, age: %v", time.Since(roleConfigCache.timestamp))
+            return roleConfigCache.config
+        }
+        log.Fatal("[FATAL] No role configuration available and failed to unmarshal new configuration")
+    }
+
+    // Update cache
+    roleConfigCache.config = &config
+    roleConfigCache.timestamp = time.Now()
+
+    log.Printf("[INFO] Successfully loaded role configuration from Secret Manager:")
+    for i, roleMapping := range config.RoleMappings {
+        log.Printf("[INFO] - Mapping %d: Skyflow role ID '%s' maps to Google roles: %v", 
+            i+1, roleMapping.SkyflowRoleID, roleMapping.GoogleRoles)
+    }
+
+    return &config
+}
+
 // Operation types and constants
 const (
     OpTokenizeValue = "tokenize_value"
@@ -39,67 +130,11 @@ const (
     minPiiLength = 7
 )
 
-// Skyflow Role IDs (from your Skyflow Vault configuration)
-const (
-    SkyflowRoleFullAccess   = "ufea24a62a2d461e97f155b81c5da5b7" // ID of Skyflow Role having FULL PII access
-    SkyflowRoleMaskedAccess = "ac917e7c350543a2990d0e4bff61fc00" // ID of Skyflow Role having MASKED PII access
-    SkyflowRoleNoAccess     = "oe572f8d5cef4077b182c2c6a549bf16" // ID of Skyflow Role having NO PII access (default for unmapped roles)
-)
-
-// Google IAM roles that map to specific Skyflow roles
-// To add a new role:
-// 1. Add the role name constant here (must match the Google IAM role value, not display name)
-// 2. Add it to the appropriate roleScopes mapping below to determine its Skyflow access level
-const (
-    RoleSkyflowAdmin     = "projects/solutionseng/roles/skyflow_admin"     // Google IAM role for full PII access
-    RoleSkyflowCS        = "projects/solutionseng/roles/skyflow_cs"        // Google IAM role for masked PII access
-    RoleSkyflowMarketing = "projects/solutionseng/roles/skyflow_marketing" // Google IAM role for no PII access
-    // Add other Google IAM roles here, then map them into Skyflow PII access patterns below
-)
-
-// Role mapping configuration
-type RoleMapping struct {
-    skyflowRoleID string   // The Skyflow role ID to use
-    googleRoles []string   // List of Google IAM roles that map to this Skyflow role
-}
-
-// Google Role to Skyflow Role mapping
-// To map a new Google IAM role:
-// 1. Add the role constant above
-// 2. Add it to the appropriate googleRoles list below based on desired access level
-// 3. Any Google IAM role not listed here will automatically map to SkyflowRoleNoAccess
-var roleScopes = map[string]RoleMapping{
-    "full_access": {
-        skyflowRoleID: SkyflowRoleFullAccess,
-        googleRoles: []string{
-            RoleSkyflowAdmin,
-            // Add other Google IAM roles that need full PII access
-            // e.g. "data_admin", "security_admin"
-        },
-    },
-    "masked_access": {
-        skyflowRoleID: SkyflowRoleMaskedAccess,
-        googleRoles: []string{
-            RoleSkyflowCS,
-            // Add other Google IAM roles that need masked PII access
-            // e.g. "support_agent", "analyst"
-        },
-    },
-    "no_access": {
-        skyflowRoleID: SkyflowRoleNoAccess,
-        googleRoles: []string{
-            RoleSkyflowMarketing,
-            // Add other Google IAM roles that need no PII access
-            // e.g. "viewer", "auditor"
-        },
-    },
-}
-
 // Operation to required roles mapping
 var operationRoles = map[string][]string{
-    OpTokenizeValue: {}, // Allow any role to run this BigQuery Function (controls only ability to run BigQuery function itself. PII access is controlled at Skyflow level via role mappings above)
-    OpTokenizeTable: {}, // Allow any role to run this BigQuery Function (controls only ability to run BigQuery function itself. PII access is controlled at Skyflow level via role mappings above)
-    OpDetokenize:    {}, // Allow any role to run this BigQuery Function (controls only ability to run BigQuery function itself. PII access is controlled at Skyflow level via role mappings above)
+    OpTokenizeValue: {}, // Allow any role to run this BigQuery Function (controls only ability to run BigQuery function itself. PII access is controlled at Skyflow level via role mappings)
+    OpTokenizeTable: {}, // Allow any role to run this BigQuery Function (controls only ability to run BigQuery function itself. PII access is controlled at Skyflow level via role mappings)
+    OpDetokenize:    {}, // Allow any role to run this BigQuery Function (controls only ability to run BigQuery function itself. PII access is controlled at Skyflow level via role mappings)
 }
 
 // Cache structure for tokenization results (within same request)
@@ -194,23 +229,30 @@ type DetokenizedRecord struct {
 
 // hasRequiredRole checks if the user has any of the required roles and returns the appropriate Skyflow role ID.
 // For operations with no required roles (empty requiredRoles list), any role is allowed but will be mapped
-// to its corresponding Skyflow role ID based on the roleScopes mapping. Unmapped roles default to SkyflowRoleNoAccess.
+// to its corresponding Skyflow role ID based on the role mappings configuration. Unmapped roles use the default role ID.
 func hasRequiredRole(userRoles []string, requiredRoles []string) (string, bool) {
+    config := getRoleConfig()
+
     // If no roles are required, we just need to map the user's role to a Skyflow role
     if len(requiredRoles) == 0 {
+        log.Printf("[DEBUG] Mapping user roles to Skyflow role. User roles: %v", userRoles)
         // Check each of the user's Google IAM roles to see if any are mapped
         for _, userRole := range userRoles {
+            log.Printf("[DEBUG] Checking role: %s", userRole)
             // Find which Skyflow role this Google role maps to
-            for _, roleMapping := range roleScopes {
-                for _, googleRole := range roleMapping.googleRoles {
+            for _, roleMapping := range config.RoleMappings {
+                log.Printf("[DEBUG] Checking mapping with roles: %v", roleMapping.GoogleRoles)
+                for _, googleRole := range roleMapping.GoogleRoles {
                     if googleRole == userRole {
-                        return roleMapping.skyflowRoleID, true
+                        log.Printf("[INFO] Found matching role! User role '%s' maps to Skyflow role ID: %s", userRole, roleMapping.SkyflowRoleID)
+                        return roleMapping.SkyflowRoleID, true
                     }
                 }
             }
         }
-        // No mapped role found, default to no access
-        return SkyflowRoleNoAccess, true
+        // No mapped role found, use default role
+        log.Printf("[WARN] No role mapping found for user roles: %v, using default role ID: %s", userRoles, config.DefaultRoleID)
+        return config.DefaultRoleID, true
     }
 
     // For operations with required roles, check if user has any of them
@@ -218,30 +260,35 @@ func hasRequiredRole(userRoles []string, requiredRoles []string) (string, bool) 
         for _, required := range requiredRoles {
             if userRole == required {
                 // User has a required role, find its Skyflow mapping
-                for _, roleMapping := range roleScopes {
-                    for _, googleRole := range roleMapping.googleRoles {
+                for _, roleMapping := range config.RoleMappings {
+                    for _, googleRole := range roleMapping.GoogleRoles {
                         if googleRole == userRole {
-                            return roleMapping.skyflowRoleID, true
+                            return roleMapping.SkyflowRoleID, true
                         }
                     }
                 }
-                // Required role exists but isn't mapped, default to no access
-                return SkyflowRoleNoAccess, true
+                // Required role exists but isn't mapped, use default role
+                log.Printf("[WARN] Required role %s exists but isn't mapped, using default role ID: %s", userRole, config.DefaultRoleID)
+                return config.DefaultRoleID, true
             }
         }
     }
     
-    // User has none of the required roles
-    return SkyflowRoleNoAccess, false
+    // User has none of the required roles, use default role but return false to indicate lack of required role
+    log.Printf("[WARN] User has none of the required roles, using default role ID: %s", config.DefaultRoleID)
+    return config.DefaultRoleID, false
 }
 
 func main() {
+    // Load initial role configuration
+    getRoleConfig() // This will load and cache the initial configuration
+
     http.HandleFunc("/", handleRequest)
     port := os.Getenv("PORT")
     if port == "" {
         port = "8080"
     }
-    log.Printf("Starting unified Skyflow service on port %s", port)
+    log.Printf("[INFO] Starting unified Skyflow service on port %s", port)
     if err := http.ListenAndServe(":"+port, nil); err != nil {
         log.Fatal(err)
     }
@@ -259,11 +306,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
         http.Error(w, fmt.Sprintf("Error reading request body: %v", err), http.StatusBadRequest)
         return
     }
-    log.Printf("Received request body: %s", string(body))
+    log.Printf("[INFO] Received request: Method=%s, ContentLength=%d", r.Method, r.ContentLength)
+    log.Printf("[DEBUG] Request body: %s", string(body))
 
     // Parse request
     var bqReq BigQueryRequest
     if err := json.Unmarshal(body, &bqReq); err != nil {
+        log.Printf("[ERROR] Failed to parse request body: %v", err)
         http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
         return
     }
@@ -279,17 +328,21 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
         Operation string `json:"operation"`
     }
     if err := json.Unmarshal(bqReq.UserDefinedContext, &userContext); err != nil {
+        log.Printf("[ERROR] Failed to parse user defined context: %v", err)
         http.Error(w, fmt.Sprintf("Error parsing user defined context: %v", err), http.StatusBadRequest)
         return
     }
     operation := userContext.Operation
+    log.Printf("[INFO] Processing %s operation for user: %s", operation, bqReq.SessionUser)
     if operation == "" {
         http.Error(w, "Operation not specified in user_defined_context", http.StatusBadRequest)
         return
     }
 
     // Get user roles
+    log.Printf("[INFO] Getting roles for user: %s", bqReq.SessionUser)
     roles, err := getUserRoles(r.Context(), bqReq.SessionUser)
+    log.Printf("[INFO] User roles: %v", roles)
     if err != nil {
         http.Error(w, fmt.Sprintf("Error getting user roles: %v", err), http.StatusInternalServerError)
         return
@@ -567,7 +620,24 @@ func processBatch(batch []Record, columnTokenMaps map[string]map[string]string, 
 // handleDetokenize handles detokenization requests
 func handleDetokenize(req BigQueryRequest, userRoles []string) (*BigQueryResponse, error) {
     // Map user's Google roles to a Skyflow role ID
-    roleID, _ := hasRequiredRole(userRoles, []string{})
+    roleID, hasRole := hasRequiredRole(userRoles, []string{})
+    log.Printf("[INFO] Detokenize request from user with roles: %v, mapped to Skyflow role: %s", userRoles, roleID)
+    if !hasRole {
+        log.Printf("[WARN] User has no valid role mapping, defaulting to no access")
+    }
+
+    // Log current role configuration
+    roleConfigCache.RLock()
+    if roleConfigCache.config != nil {
+        log.Printf("[DEBUG] Current role configuration (age: %v):", time.Since(roleConfigCache.timestamp))
+        for i, roleMapping := range roleConfigCache.config.RoleMappings {
+            log.Printf("[DEBUG] - Mapping %d: Skyflow role ID '%s' maps to Google roles: %v", 
+                i+1, roleMapping.SkyflowRoleID, roleMapping.GoogleRoles)
+        }
+    } else {
+        log.Printf("[WARN] No role configuration available")
+    }
+    roleConfigCache.RUnlock()
     batchSize := getBatchSize("SKYFLOW_DETOKENIZE_BATCH_SIZE", 25)
 
     // Process tokens in batches
@@ -602,18 +672,26 @@ func handleDetokenize(req BigQueryRequest, userRoles []string) (*BigQueryRespons
         }
 
         // Make Skyflow request
-        log.Printf("Making request to Skyflow API with %d tokens", len(detokenizeReq.DetokenizationParameters))
+        log.Printf("[INFO] Making request to Skyflow API with %d tokens using role ID: %s", len(detokenizeReq.DetokenizationParameters), roleID)
         resp, err := makeSkyflowAPIRequest[DetokenizeRequest, DetokenizeResponse]("/detokenize", detokenizeReq, req.SessionUser, roleID)
         if err != nil {
-            log.Printf("Error making Skyflow request: %v", err)
+            log.Printf("[ERROR] Skyflow request failed: %v", err)
             return make([]interface{}, len(batch)), nil
         }
 
         // Map responses back to original order
         results := make([]interface{}, len(batch))
         for j := range batch {
-            if j < len(resp.Records) && resp.Records[j].Error == nil {
-                results[j] = resp.Records[j].Value
+            if j < len(resp.Records) {
+                if resp.Records[j].Error != nil {
+                    log.Printf("[ERROR] Skyflow error for token %s: %v", detokenizeReq.DetokenizationParameters[j].Token, resp.Records[j].Error)
+                } else {
+                    log.Printf("[DEBUG] Skyflow response for token %s: value=%s, type=%s", 
+                        detokenizeReq.DetokenizationParameters[j].Token,
+                        resp.Records[j].Value,
+                        resp.Records[j].ValueType)
+                    results[j] = resp.Records[j].Value
+                }
             }
         }
         return results, nil
@@ -670,11 +748,14 @@ func getBearerToken(userEmail string, roleID string) (string, error) {
     if roleID != "" {
         key = fmt.Sprintf("%s:%s", roleID, userEmail)
     }
+    log.Printf("[DEBUG] Getting bearer token for cache key: %s", key)
 
     // Check cache
     if token, ok := bearerTokenCache.Load(key); ok {
+        log.Printf("[DEBUG] Found cached bearer token for key: %s", key)
         return token.(string), nil
     }
+    log.Printf("[DEBUG] No cached bearer token found, requesting new token")
 
     // Load credentials from Secret Manager
     creds, err := getCredentials()
@@ -694,7 +775,11 @@ func getBearerToken(userEmail string, roleID string) (string, error) {
         "assertion":  signedToken,
     }
     if roleID != "" {
-        tokenData["scope"] = fmt.Sprintf("role:%s", roleID)
+        scope := fmt.Sprintf("role:%s", roleID)
+        tokenData["scope"] = scope
+        log.Printf("[DEBUG] Adding scope to token request: %s", scope)
+    } else {
+        log.Printf("[WARN] No role ID provided for token request")
     }
 
     tokenJSON, err := json.Marshal(tokenData)
@@ -703,6 +788,7 @@ func getBearerToken(userEmail string, roleID string) (string, error) {
     }
 
     // Make request
+    log.Printf("[DEBUG] Requesting bearer token from %s", creds.TokenURI)
     req, err := http.NewRequest("POST", creds.TokenURI, bytes.NewBuffer(tokenJSON))
     if err != nil {
         return "", err
@@ -722,6 +808,8 @@ func getBearerToken(userEmail string, roleID string) (string, error) {
     }
 
     if resp.StatusCode != http.StatusOK {
+        log.Printf("[ERROR] Failed to get bearer token. Status: %d, Response: %s, Request data: %s", 
+            resp.StatusCode, string(body), string(tokenJSON))
         return "", fmt.Errorf("failed to get bearer token: %s", string(body))
     }
 
@@ -736,6 +824,8 @@ func getBearerToken(userEmail string, roleID string) (string, error) {
     }
 
     // Cache token
+    log.Printf("[DEBUG] Successfully got bearer token with scope '%s', caching with key: %s", 
+        tokenData["scope"], key)
     bearerTokenCache.Store(key, accessToken)
 
     return accessToken, nil

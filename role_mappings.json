@@ -1,0 +1,32 @@
+{
+  "defaultRoleID": "oe572f8d5cef4077b182c2c6a549bf16",
+  "roleMappings": [
+    {
+      "skyflowRoleID": "ufea24a62a2d461e97f155b81c5da5b7",
+      "googleRoles": [
+        "projects/${PROJECT_ID}/roles/skyflow_admin",
+        "additional_role_1",
+        "additional_role_2",
+        "additional_role_3"
+      ]
+    },
+    {
+      "skyflowRoleID": "ac917e7c350543a2990d0e4bff61fc00",
+      "googleRoles": [
+        "projects/${PROJECT_ID}/roles/skyflow_cs",
+        "additional_role_4",
+        "additional_role_5",
+        "additional_role_6"
+      ]
+    },
+    {
+      "skyflowRoleID": "oe572f8d5cef4077b182c2c6a549bf16",
+      "googleRoles": [
+        "projects/${PROJECT_ID}/roles/skyflow_marketing",
+        "additional_role_7",
+        "additional_role_8",
+        "additional_role_9"
+      ]
+    }
+  ]
+}

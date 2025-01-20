@@ -123,11 +123,12 @@ sequenceDiagram
   - Bearer token caching for reduced API calls
 
 - **Security**:
-  - Role-based access control (RBAC) with flexible role mapping:
-    - Full PII access (skyflow_admin)
-    - Masked PII access (skyflow_cs)
-    - No PII access (skyflow_marketing)
-    - Easily extensible for additional roles
+  - Role-based access control (RBAC) with configurable role mapping:
+    - Project-agnostic configuration using ${PROJECT_ID} placeholder
+    - Default role ID for unmapped roles
+    - Flexible mapping between Google IAM roles and Skyflow role IDs
+    - Support for multiple Google roles per Skyflow role
+    - Easy to extend with additional role mappings
   - Operation-level access control for BigQuery functions
   - Secure credential management via Secret Manager
   - TLS encryption for all service communication
@@ -152,7 +153,22 @@ sequenceDiagram
 2. **Skyflow Account** with:
    - Valid JWT configuration
    - API access
-   - Vault configuration
+   - Vault setup:
+     1. Go to Skyflow Studio UI
+     2. Create a new vault using udf_vault_schema.json template provided in this repository
+        - The template defines the vault structure for storing PII data
+        - Includes table schema and field configurations
+        - Optimized for BigQuery integration
+     3. Create roles in the vault according to your organization's needs
+        - Recommended role types (examples):
+          * Role with full PII access (e.g. for audit, security teams)
+          * Role with masked PII access (e.g. for customer service teams)
+          * Role with no PII access (e.g. for analytics teams)
+        - Note: These are example roles only. Create roles based on:
+          * Your organization's security policies
+          * Data access requirements
+          * Compliance needs
+     4. Record the role IDs of your created roles for use in role_mappings.json configuration
 
 3. **Local Development Environment**:
    - macOS with Homebrew
@@ -167,10 +183,39 @@ sequenceDiagram
    cd gcp_bigquery_functions_udfs
    ```
 
-2. Add Skyflow credentials file:
+2. Add required configuration files:
+
+   a. Skyflow credentials file:
    - Create a service account in your Skyflow account
    - Download the generated credentials.json file
    - Place it in the project root directory
+
+   b. Role mappings configuration:
+   - Create role_mappings.json file in the project root directory
+   - Configure with your Skyflow role IDs and Google IAM roles
+   - Use ${PROJECT_ID} placeholder for project name
+   - Example structure:
+     ```json
+     {
+       "defaultRoleID": "your_default_role_id",
+       "roleMappings": [
+         {
+           "skyflowRoleID": "your_admin_role_id",
+           "googleRoles": [
+             "projects/${PROJECT_ID}/roles/skyflow_admin",
+             "additional_role_1"
+           ]
+         },
+         {
+           "skyflowRoleID": "your_cs_role_id",
+           "googleRoles": [
+             "projects/${PROJECT_ID}/roles/skyflow_cs",
+             "additional_role_2"
+           ]
+         }
+       ]
+     }
+     ```
 
 3. Run setup script with your chosen prefix:
    ```bash
@@ -178,8 +223,9 @@ sequenceDiagram
    ```
    
    The script will:
-   - Validate credentials.json format
+   - Validate credentials.json and role_mappings.json formats
    - Convert prefix to lowercase and replace non-alphanumeric chars with underscores
+   - Process role_mappings.json to use actual project ID
    - Prompt for configuration values (press Enter to use defaults):
      ```bash
      # Environment Variables
@@ -306,6 +352,7 @@ ORDER BY avg_spent DESC;
 ├── config.sh              # Environment configuration
 ├── google_cloud_ops.sh    # GCP operations helper
 ├── setup.sh              # Main deployment script
+├── role_mappings.json    # Role mapping configuration
 ├── udf_vault_schema.json # Vault schema configuration
 └── README.md             # Project documentation
 ```

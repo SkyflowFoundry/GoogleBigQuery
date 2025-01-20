@@ -21,9 +21,12 @@ fi
 
 # Function to prompt for configuration values
 prompt_for_config() {
-    # Get full path for credentials.json
+    # Get full paths for required JSON files
     local script_dir="$(cd "$(dirname "$0")" && pwd)"
     local credentials_path="$script_dir/credentials.json"
+    local role_mappings_path="$script_dir/role_mappings.json"
+
+    # Check for credentials.json
     if [[ ! -f "$credentials_path" ]]; then
         echo "Error: credentials.json not found at: $credentials_path"
         echo
@@ -37,9 +40,25 @@ prompt_for_config() {
         exit 1
     fi
 
-    # Validate JSON format
+    # Check for role_mappings.json
+    if [[ ! -f "$role_mappings_path" ]]; then
+        echo "Error: role_mappings.json not found at: $role_mappings_path"
+        echo
+        echo "To set up role mappings:"
+        echo "1. Create role_mappings.json file with your Skyflow role mappings"
+        echo "2. Include defaultRoleID and roleMappings array"
+        echo "3. Save it in: $role_mappings_path"
+        echo
+        exit 1
+    fi
+
+    # Validate JSON format for both files
     if ! jq . "$credentials_path" >/dev/null 2>&1; then
         echo "Error: Invalid JSON format in credentials.json"
+        exit 1
+    fi
+    if ! jq . "$role_mappings_path" >/dev/null 2>&1; then
+        echo "Error: Invalid JSON format in role_mappings.json"
         exit 1
     fi
 
@@ -93,10 +112,17 @@ create_components() {
     local script_dir="$(cd "$(dirname "$0")" && pwd)"
     local credentials_path="$script_dir/credentials.json"
 
-    echo "Creating Secret Manager secret..."
+    echo "Creating Secret Manager secrets..."
+    # Create credentials secret
     gcloud secrets create "${PREFIX}_credentials" \
         --replication-policy="automatic" \
         --data-file="$credentials_path"
+
+    # Create role mappings secret (process with envsubst first)
+    echo "Creating role mappings secret..."
+    cat "$script_dir/role_mappings.json" | envsubst | gcloud secrets create "${PREFIX}_role_mappings" \
+        --replication-policy="automatic" \
+        --data-file=-
 
     echo "Creating BigQuery dataset..."
     bq --location=${REGION} mk --dataset "${PROJECT_ID}:${DATASET}"
@@ -143,6 +169,10 @@ destroy_components() {
 
     # Clean up Cloud Run resources
     cleanup_resources
+
+    echo "Deleting Secret Manager secrets..."
+    gcloud secrets delete "${PREFIX}_credentials" --quiet || true
+    gcloud secrets delete "${PREFIX}_role_mappings" --quiet || true
 
     echo "Destroy complete!"
 }
