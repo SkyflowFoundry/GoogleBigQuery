@@ -77,7 +77,7 @@ deploy_cloud_run() {
         --region=$REGION \
         --allow-unauthenticated \
         --set-env-vars "$env_vars" \
-        --set-secrets CREDENTIALS_JSON=${PREFIX}_credentials:latest \
+        --set-secrets CREDENTIALS_JSON=${PREFIX}_credentials:latest,ROLE_MAPPINGS_JSON=${PREFIX}_role_mappings:latest \
         --format="value(status.url)"); then
         echo "Error: Cloud Run deployment failed for $SKYFLOW_SERVICE_NAME"
         cd "$current_dir"
@@ -141,7 +141,4 @@ cleanup_resources() {
     echo "Deleting Cloud Run service..."
     # Delete service
     gcloud run services delete "$SKYFLOW_SERVICE_NAME_HYPHENATED" --region=$REGION --quiet
-
-    echo "Deleting Secret Manager secret..."
-    gcloud secrets delete ${PREFIX}_credentials --quiet
 }
