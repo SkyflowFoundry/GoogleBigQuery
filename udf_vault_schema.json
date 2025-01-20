@@ -1,7 +1,7 @@
 {
     "schemas": [
         {
-            "ID": "t98b044d80184b1fab4b6200c2a7b53b",
+            "ID": "ld4bf873aaba4503a232e43651f6fb4b",
             "name": "pii",
             "parentSchemaProperties": {
                 "parentID": "",
@@ -58,7 +58,7 @@
                     "ID": ""
                 },
                 {
-                    "name": "pii_fpt",
+                    "name": "pii",
                     "datatype": "DT_STRING",
                     "isArray": false,
                     "tags": [
@@ -107,65 +107,7 @@
                         {
                             "name": "skyflow.options.display_name",
                             "values": [
-                                "pii_fpt"
-                            ]
-                        }
-                    ],
-                    "properties": null,
-                    "index": 0,
-                    "ID": ""
-                },
-                {
-                    "name": "pii_non_fpt",
-                    "datatype": "DT_STRING",
-                    "isArray": false,
-                    "tags": [
-                        {
-                            "name": "skyflow.options.default_dlp_policy",
-                            "values": [
-                                "MASK"
-                            ]
-                        },
-                        {
-                            "name": "skyflow.options.find_pattern",
-                            "values": [
-                                "(.).*(.{2})"
-                            ]
-                        },
-                        {
-                            "name": "skyflow.options.replace_pattern",
-                            "values": [
-                                "${1}***${2}"
-                            ]
-                        },
-                        {
-                            "name": "skyflow.options.operation",
-                            "values": [
-                                "ALL_OP"
-                            ]
-                        },
-                        {
-                            "name": "skyflow.options.default_token_policy",
-                            "values": [
-                                "DETERMINISTIC_UUID"
-                            ]
-                        },
-                        {
-                            "name": "skyflow.options.index",
-                            "values": [
-                                "true"
-                            ]
-                        },
-                        {
-                            "name": "skyflow.options.description",
-                            "values": [
-                                "String"
-                            ]
-                        },
-                        {
-                            "name": "skyflow.options.display_name",
-                            "values": [
-                                "pii_non_fpt"
+                                "pii"
                             ]
                         }
                     ],
