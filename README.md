@@ -155,7 +155,7 @@ sequenceDiagram
    - API access
    - Vault setup:
      1. Go to Skyflow Studio UI
-     2. Create a new vault using udf_vault_schema.json template provided in this repository
+     2. Create a new vault using vault_schema.json template provided in this repository
         - The template defines the vault structure for storing PII data
         - Includes table schema and field configurations
         - Optimized for BigQuery integration
@@ -353,7 +353,7 @@ ORDER BY avg_spent DESC;
 ├── google_cloud_ops.sh    # GCP operations helper
 ├── setup.sh              # Main deployment script
 ├── role_mappings.json    # Role mapping configuration
-├── udf_vault_schema.json # Vault schema configuration
+├── vault_schema.json # Vault schema configuration
 └── README.md             # Project documentation
 ```
 
