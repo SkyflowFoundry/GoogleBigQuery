@@ -237,7 +237,7 @@ sequenceDiagram
      SKYFLOW_ACCOUNT_ID="your-account-id"      # Skyflow account identifier
      SKYFLOW_VAULT_URL="your-vault-url"        # Skyflow vault URL
      SKYFLOW_VAULT_ID="your-vault-id"          # Skyflow vault identifier
-     SKYFLOW_TABLE_NAME="bigquery"             # Skyflow table name
+     SKYFLOW_TABLE_NAME="pii"             # Skyflow table name
      
      # Batch Processing Configuration
      SKYFLOW_INSERT_BATCH_SIZE="25"            # Batch size for Skyflow tokenization requests

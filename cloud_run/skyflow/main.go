@@ -739,14 +739,15 @@ func getUserRoles(ctx context.Context, email string) ([]string, error) {
 }
 
 // getBearerToken gets a bearer token from Skyflow with optional role scope
-func getBearerToken(userEmail string, roleID string) (string, error) {
+func getBearerToken(userEmail string, roleID string, userRoles []string) (string, error) {
     mutex.Lock()
     defer mutex.Unlock()
 
-    // Generate cache key
+    // Generate cache key including user's Google roles
+    rolesStr := strings.Join(userRoles, ",")
     key := userEmail
     if roleID != "" {
-        key = fmt.Sprintf("%s:%s", roleID, userEmail)
+        key = fmt.Sprintf("%s:%s:%s", roleID, userEmail, rolesStr)
     }
     log.Printf("[DEBUG] Getting bearer token for cache key: %s", key)
 
@@ -1182,8 +1183,15 @@ func completeTokenPromise(promise *tokenPromise, value string, token string, err
 func makeSkyflowAPIRequest[Req any, Resp any](endpoint string, req Req, userEmail string, roleID string) (*Resp, error) {
     client := newSkyflowClient()
 
+    // Get user roles from context
+    ctx := context.Background()
+    roles, err := getUserRoles(ctx, userEmail)
+    if err != nil {
+        return nil, fmt.Errorf("error getting user roles: %v", err)
+    }
+
     // Get bearer token with user context and role ID
-    bearerToken, err := getBearerToken(userEmail, roleID)
+    bearerToken, err := getBearerToken(userEmail, roleID, roles)
     if err != nil {
         return nil, fmt.Errorf("error getting bearer token: %v", err)
     }
