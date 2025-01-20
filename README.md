@@ -123,14 +123,17 @@ sequenceDiagram
   - Bearer token caching for reduced API calls
 
 - **Security**:
-  - Role-based access control (RBAC) with predefined roles:
-    - skyflow_admin: Full access to all operations
-    - skyflow_cs: Masked access for customer service
-    - skyflow_marketing: Limited access for marketing
+  - Role-based access control (RBAC) with flexible role mapping:
+    - Full PII access (skyflow_admin)
+    - Masked PII access (skyflow_cs)
+    - No PII access (skyflow_marketing)
+    - Easily extensible for additional roles
+  - Operation-level access control for BigQuery functions
   - Secure credential management via Secret Manager
   - TLS encryption for all service communication
   - Minimal IAM permissions following least privilege
   - PII data never logged or stored temporarily
+  - Token caching with thread-safe promise mechanism
 
 - **Flexibility**:
   - Support for multiple columns in single request
@@ -179,19 +182,21 @@ sequenceDiagram
    - Convert prefix to lowercase and replace non-alphanumeric chars with underscores
    - Prompt for configuration values (press Enter to use defaults):
      ```bash
-     # Project configuration
-     PROJECT_ID="your-project-id"
-     REGION="your-project-region" # ex. us-west1
+     # Environment Variables
+     PROJECT_ID="your-project-id"              # Google Cloud project ID
+     REGION="your-project-region"              # ex. us-west1
+     PREFIX="your-prefix"                      # Prefix for resources and functions
      
-     # Skyflow configuration
-     SKYFLOW_ACCOUNT_ID="your-account-id"
-     SKYFLOW_VAULT_ID="your-vault-id"
-     SKYFLOW_TABLE_NAME="bigquery"
+     # Skyflow Configuration
+     SKYFLOW_ACCOUNT_ID="your-account-id"      # Skyflow account identifier
+     SKYFLOW_VAULT_URL="your-vault-url"        # Skyflow vault URL
+     SKYFLOW_VAULT_ID="your-vault-id"          # Skyflow vault identifier
+     SKYFLOW_TABLE_NAME="bigquery"             # Skyflow table name
      
-     # Batch size configurations
-     SKYFLOW_INSERT_BATCH_SIZE="25" # Contact Skyflow to increase batch limit
-     SKYFLOW_DETOKENIZE_BATCH_SIZE="25" # Contact Skyflow to increase batch limit
-     BIGQUERY_UPDATE_BATCH_SIZE="1000"
+     # Batch Processing Configuration
+     SKYFLOW_INSERT_BATCH_SIZE="25"            # Batch size for Skyflow tokenization requests
+     SKYFLOW_DETOKENIZE_BATCH_SIZE="25"        # Batch size for Skyflow detokenization requests
+     BIGQUERY_UPDATE_BATCH_SIZE="1000"         # Batch size for BigQuery table updates
      ```
    - Install required dependencies
    - Enable necessary Google Cloud APIs
@@ -321,11 +326,12 @@ The service implements comprehensive error handling:
   - Database constraints
 
 - **Recovery Mechanisms**:
-  - Automatic retries
-  - Batch failure isolation
-  - Transaction rollbacks
-  - Detailed error reporting
-  - In-flight request caching
+  - Token promise system for concurrent request handling
+  - Batch failure isolation with independent error handling
+  - Transaction rollbacks for atomic updates
+  - Detailed error reporting with context
+  - In-flight request caching to prevent duplicate processing
+  - Bearer token caching with thread-safe access
 
 ## Development Guide
 
