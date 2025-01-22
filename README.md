@@ -338,23 +338,23 @@ ORDER BY avg_spent DESC;
 
 ```
 .
-├── cloud_run/              # Cloud Run service
-│   └── skyflow/           # Unified service implementation
-│       ├── main.go        # Service implementation
-│       └── go.mod         # Go dependencies
-├── sql/                   # SQL definitions
-│   ├── create_table.sql                    # Table schema
-│   ├── create_tokenize_table_function.sql  # Table tokenization UDF
-│   ├── create_tokenize_value_function.sql  # Value tokenization UDF
-│   ├── create_detokenize_function.sql      # Detokenization UDF
-│   ├── insert_sample_data.sql             # Sample data insertion
-│   └── example_queries.sql                # Example usage queries
-├── config.sh              # Environment configuration
-├── google_cloud_ops.sh    # GCP operations helper
-├── setup.sh              # Main deployment script
-├── role_mappings.json    # Role mapping configuration
-├── vault_schema.json # Vault schema configuration
-└── README.md             # Project documentation
+├── cloud_run/                             # Cloud Run service
+│   └── skyflow/                          # Service implementation
+│       ├── main.go                       # Service implementation
+│       └── go.mod                        # Go dependencies
+├── sql/                                  # SQL definitions
+│   ├── create_detokenize_function.sql    # Detokenization UDF
+│   ├── create_tokenize_table_function.sql # Table tokenization UDF
+│   ├── create_tokenize_value_function.sql # Value tokenization UDF
+│   ├── example_queries.sql               # Example usage queries
+│   └── insert_sample_data.sql           # Sample data insertion
+├── config.sh                             # Environment configuration
+├── google_cloud_ops.sh                   # GCP operations helper
+├── LICENSE                               # License file
+├── README.md                             # Project documentation
+├── role_mappings.json                    # Role mapping configuration
+├── setup.sh                              # Main deployment script
+└── vault_schema.json                     # Vault schema configuration
 ```
 
 ## Error Handling

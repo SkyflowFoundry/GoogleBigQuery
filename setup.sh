@@ -127,10 +127,7 @@ create_components() {
     echo "Creating BigQuery dataset..."
     bq --location=${REGION} mk --dataset "${PROJECT_ID}:${DATASET}"
 
-    echo "Creating BigQuery table..."
-    cat "$(dirname "$0")/sql/create_table.sql" | envsubst | bq query --use_legacy_sql=false
-
-    echo "Inserting sample data..."
+    echo "Creating BigQuery table and inserting sample data..."
     cat "$(dirname "$0")/sql/insert_sample_data.sql" | envsubst | bq query --use_legacy_sql=false
 
     # Deploy unified Skyflow service
