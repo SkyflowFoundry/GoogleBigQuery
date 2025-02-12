@@ -47,11 +47,20 @@ var (
         config    *RoleConfig
         timestamp time.Time
     }
+    
+    // Cache for IAM roles
+    iamRolesCache struct {
+        sync.RWMutex
+        roles     map[string][]string  // map[email][]roles
+        timestamp map[string]time.Time // map[email]timestamp
+    }
 )
 
 const (
     // Cache duration for role configuration
     roleConfigCacheDuration = 30 * time.Second // Short duration to ensure updates are picked up quickly
+    // Cache duration for IAM roles
+    iamRolesCacheDuration = 5 * time.Minute  // Longer duration since IAM changes are less frequent
 )
 
 // getRoleConfig safely retrieves the current role configuration, refreshing if needed
@@ -277,6 +286,12 @@ func hasRequiredRole(userRoles []string, requiredRoles []string) (string, bool) 
     // User has none of the required roles, use default role but return false to indicate lack of required role
     log.Printf("[WARN] User has none of the required roles, using default role ID: %s", config.DefaultRoleID)
     return config.DefaultRoleID, false
+}
+
+func init() {
+    // Initialize IAM roles cache maps
+    iamRolesCache.roles = make(map[string][]string)
+    iamRolesCache.timestamp = make(map[string]time.Time)
 }
 
 func main() {
@@ -705,15 +720,40 @@ func handleDetokenize(req BigQueryRequest, userRoles []string) (*BigQueryRespons
     return &BigQueryResponse{Replies: results}, nil
 }
 
-// getUserRoles fetches user roles from Cloud Resource Manager
+// getUserRoles fetches user roles from Cloud Resource Manager with caching
 func getUserRoles(ctx context.Context, email string) ([]string, error) {
+    // Try read lock first
+    iamRolesCache.RLock()
+    if roles, ok := iamRolesCache.roles[email]; ok {
+        if time.Since(iamRolesCache.timestamp[email]) < iamRolesCacheDuration {
+            iamRolesCache.RUnlock()
+            log.Printf("[DEBUG] Using cached IAM roles for %s, age: %v", 
+                email, time.Since(iamRolesCache.timestamp[email]))
+            return roles, nil
+        }
+    }
+    iamRolesCache.RUnlock()
+
+    // Cache miss or expired, acquire write lock
+    iamRolesCache.Lock()
+    defer iamRolesCache.Unlock()
+
+    // Double check after acquiring write lock
+    if roles, ok := iamRolesCache.roles[email]; ok {
+        if time.Since(iamRolesCache.timestamp[email]) < iamRolesCacheDuration {
+            log.Printf("[DEBUG] Using cached IAM roles after write lock for %s, age: %v", 
+                email, time.Since(iamRolesCache.timestamp[email]))
+            return roles, nil
+        }
+    }
+
     // Get project ID from environment variable
     projectID := os.Getenv("PROJECT_ID")
     if projectID == "" {
         return nil, fmt.Errorf("PROJECT_ID environment variable not set")
     }
 
-    // Initialize the Cloud Resource Manager client with default credentials
+    // Initialize the Cloud Resource Manager client
     client, err := cloudresourcemanager.NewService(ctx)
     if err != nil {
         return nil, fmt.Errorf("failed to create Cloud Resource Manager client: %v", err)
@@ -722,11 +762,16 @@ func getUserRoles(ctx context.Context, email string) ([]string, error) {
     // Get IAM Policy
     policy, err := client.Projects.GetIamPolicy(projectID, &cloudresourcemanager.GetIamPolicyRequest{}).Context(ctx).Do()
     if err != nil {
+        // If we have stale data, return it rather than failing
+        if roles, ok := iamRolesCache.roles[email]; ok {
+            log.Printf("[WARN] Failed to fetch fresh IAM roles, using stale data for %s: %v", email, err)
+            return roles, nil
+        }
         return nil, fmt.Errorf("failed to get IAM policy: %v", err)
     }
 
     // Find roles for the user
-    roles := make([]string, 0, len(policy.Bindings))
+    roles := make([]string, 0)
     for _, binding := range policy.Bindings {
         for _, member := range binding.Members {
             if strings.EqualFold(member, fmt.Sprintf("user:%s", email)) {
@@ -735,6 +780,12 @@ func getUserRoles(ctx context.Context, email string) ([]string, error) {
         }
     }
 
+    // Update cache
+    iamRolesCache.roles[email] = roles
+    iamRolesCache.timestamp[email] = time.Now()
+    
+    log.Printf("[INFO] Successfully cached IAM roles for %s: %v", email, roles)
+    
     return roles, nil
 }
 
